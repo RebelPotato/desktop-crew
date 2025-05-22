@@ -1,99 +1,167 @@
-use std::time::{Duration, Instant};
+use sdl3::event::Event;
+use sdl3::keyboard::Keycode;
+use sdl3::pixels::Color;
+use sdl3::rect::Point;
+use sdl3::render::BlendMode;
+use std::{
+    error::Error,
+    time::{Duration, Instant},
+};
 
-struct GifPlayer {
-    frames: Vec<(Duration, egui::TextureHandle)>,
-    start_time: Instant,
-    current_frame: usize,
-    accumulated_time: Duration,
+struct Ball {
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+    radius: f32,
+    dragged: bool,
 }
 
-impl GifPlayer {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Load your GIF file here
-        let gif_data = include_bytes!("../.assets/dl_gif_handsome-handsome_final.gif");
-
-        let mut decoder = gif::DecodeOptions::new();
-        decoder.set_color_output(gif::ColorOutput::RGBA);
-        let mut decoder = decoder.read_info(&gif_data[..]).unwrap();
-
-        let mut frames = Vec::new();
-        let mut index = 0;
-
-        while let Some(frame) = decoder.read_next_frame().unwrap() {
-            let delay = Duration::from_millis((frame.delay as u64) * 10);
-            let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                [frame.width as usize, frame.height as usize],
-                &frame.buffer,
-            );
-
-            let texture = cc.egui_ctx.load_texture(
-                format!("frame-{}", index),
-                color_image,
-                Default::default(),
-            );
-
-            frames.push((delay, texture));
-            index += 1;
-        }
-
-        GifPlayer {
-            frames,
-            start_time: Instant::now(),
-            current_frame: 0,
-            accumulated_time: Duration::ZERO,
+impl Ball {
+    fn new(x: f32, y: f32, radius: f32) -> Self {
+        Ball {
+            x,
+            y,
+            vx: 0.0,
+            vy: 0.0,
+            radius,
+            dragged: false,
         }
     }
 }
 
-impl eframe::App for GifPlayer {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        egui::Rgba::TRANSPARENT.to_array()
-    }
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.frames.is_empty() {
-            return;
-        }
+const SDL_WINDOW_TRANSPARENT: u32 = 0x40000000;
 
-        let elapsed = self.start_time.elapsed();
-        let total_duration = self.frames.iter().map(|(d, _)| *d).sum::<Duration>();
+fn main() -> Result<(), Box<dyn Error>> {
+    let sdl = sdl3::init()?;
+    let video = sdl.video()?;
 
-        let loop_time =
-            Duration::from_nanos((elapsed.as_nanos() % total_duration.as_nanos()) as u64);
-        let mut accumulated = Duration::ZERO;
+    // Get display mode for fullscreen dimensions
+    let display_mode = video.get_primary_display()?.get_mode()?;
+    let (width, height) = (display_mode.w as f32, display_mode.h as f32);
 
-        for (i, (delay, _)) in self.frames.iter().enumerate() {
-            accumulated += *delay;
-            if accumulated > loop_time {
-                self.current_frame = i;
-                break;
+    // Create transparent window
+    let window = video
+        .window("Bouncing Ball", width as u32, height as u32)
+        .set_window_flags(SDL_WINDOW_TRANSPARENT)
+        .borderless()
+        .position_centered()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut canvas = window.into_canvas();
+
+    canvas.set_blend_mode(BlendMode::Blend);
+
+    let mut ball = Ball::new(width / 2.0, height / 2.0, 25.0);
+    let mut last_update = Instant::now();
+    let mut event_pump = sdl.event_pump()?;
+
+    'running: loop {
+        // Handle events
+        for event in event_pump.poll_iter() {
+            match event {
+                Event::Quit { .. }
+                | Event::KeyDown {
+                    keycode: Some(Keycode::Escape),
+                    ..
+                } => break 'running,
+
+                Event::MouseMotion {
+                    x, y, mousestate, ..
+                } => {
+                    if mousestate.left() {
+                        let dx = x as f32 - ball.x;
+                        let dy = y as f32 - ball.y;
+
+                        // Check if clicking on the ball
+                        if dx.powi(2) + dy.powi(2) <= ball.radius.powi(2) || ball.dragged {
+                            ball.dragged = true;
+                            ball.x = x as f32;
+                            ball.y = y as f32;
+                            ball.vx = 0.0;
+                            ball.vy = 0.0;
+                        }
+                    }
+                }
+
+                Event::MouseButtonUp { .. } => {
+                    ball.dragged = false;
+                }
+
+                _ => {}
             }
         }
 
-        egui::Area::new("gif_area".into())
-            .movable(false)
-            .interactable(false)
-            .show(ctx, |ui| {
-                if let Some((_, texture)) = self.frames.get(self.current_frame) {
-                    ui.image(texture);
-                }
-            });
+        // Physics update
+        let delta_time = last_update.elapsed().as_secs_f32();
+        last_update = Instant::now();
 
-        ctx.request_repaint();
+        if !ball.dragged {
+            // Apply gravity
+            ball.vy += 500.0 * delta_time;
+
+            // Update position
+            ball.x += ball.vx * delta_time;
+            ball.y += ball.vy * delta_time;
+
+            // Window bounds collision
+            if ball.x < ball.radius {
+                ball.x = ball.radius;
+                ball.vx *= -0.8;
+            } else if ball.x > width - ball.radius {
+                ball.x = width - ball.radius;
+                ball.vx *= -0.8;
+            }
+
+            if ball.y < ball.radius {
+                ball.y = ball.radius;
+                ball.vy *= -0.8;
+            } else if ball.y > height - ball.radius {
+                ball.y = height - ball.radius;
+                ball.vy *= -0.8;
+            }
+
+            // Air resistance
+            ball.vx *= 1.0 - (0.5 * delta_time);
+            ball.vy *= 1.0 - (0.5 * delta_time);
+        }
+
+        // Drawing
+        canvas.set_draw_color(Color::RGBA(0, 0, 0, 0));
+        canvas.clear();
+
+        // Draw ball
+        canvas.set_draw_color(Color::RGBA(255, 100, 100, 255));
+        draw_circle(
+            &mut canvas,
+            ball.x as i32,
+            ball.y as i32,
+            ball.radius as i32,
+        )?;
+
+        canvas.present();
+        std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
     }
+
+    Ok(())
 }
 
-fn main() -> eframe::Result<()> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_transparent(true)
-            .with_decorations(true)
-            .with_inner_size([400.0, 400.0]),
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "Transparent GIF Viewer",
-        options,
-        Box::new(|cc| Ok(Box::new(GifPlayer::new(cc)))),
-    )
+fn draw_circle(
+    canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
+    x: i32,
+    y: i32,
+    radius: i32,
+) -> Result<(), Box<dyn Error>> {
+    let diameter = radius * 2;
+    for w in 0..diameter {
+        for h in 0..diameter {
+            let dx = radius - w;
+            let dy = radius - h;
+            if (dx * dx + dy * dy) <= (radius * radius) {
+                canvas.draw_point(Point::new(x + dx, y + dy))?;
+            }
+        }
+    }
+    Ok(())
 }
